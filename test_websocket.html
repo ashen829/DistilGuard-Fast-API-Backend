@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S3 Event Dashboard - WebSocket Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        header {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        
+        .status {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        
+        .status.connected {
+            background: #10b981;
+            color: white;
+        }
+        
+        .status.disconnected {
+            background: #ef4444;
+            color: white;
+        }
+        
+        .status.connecting {
+            background: #f59e0b;
+            color: white;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        h2 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 18px;
+        }
+        
+        .event {
+            background: #f3f4f6;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            border-left: 4px solid #667eea;
+            animation: slideIn 0.3s ease;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+        
+        .event-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+        }
+        
+        .event-type {
+            font-weight: 600;
+            color: #667eea;
+        }
+        
+        .event-time {
+            color: #6b7280;
+            font-size: 12px;
+        }
+        
+        .event-details {
+            font-size: 14px;
+            color: #4b5563;
+        }
+        
+        .event-key {
+            font-weight: 600;
+            color: #333;
+            margin-right: 5px;
+        }
+        
+        .log {
+            background: #1f2937;
+            color: #10b981;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .log-entry {
+            margin-bottom: 5px;
+        }
+        
+        .log-time {
+            color: #6b7280;
+        }
+        
+        .log-message {
+            color: #e5e7eb;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+        
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        
+        .btn-danger {
+            background: #ef4444;
+            color: white;
+        }
+        
+        .btn-secondary {
+            background: #6b7280;
+            color: white;
+        }
+        
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin-top: 20px;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 5px;
+        }
+        
+        .stat-label {
+            font-size: 12px;
+            opacity: 0.9;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 S3 Event Dashboard</h1>
+            <p>Real-time monitoring of S3 uploads via WebSocket</p>
+            <p style="margin-top: 10px;">
+                <span id="connectionStatus" class="status disconnected">Disconnected</span>
+            </p>
+        </header>
+        
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="totalEvents">0</div>
+                <div class="stat-label">Total Events</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="filesUploaded">0</div>
+                <div class="stat-label">Files Uploaded</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="totalSize">0 KB</div>
+                <div class="stat-label">Total Size</div>
+            </div>
+        </div>
+        
+        <div class="grid">
+            <div class="card">
+                <h2>📥 Recent Events</h2>
+                <div id="events"></div>
+                <div class="controls">
+                    <button class="btn-primary" onclick="connect()">Connect</button>
+                    <button class="btn-danger" onclick="disconnect()">Disconnect</button>
+                    <button class="btn-secondary" onclick="clearEvents()">Clear</button>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>📝 Connection Log</h2>
+                <div class="log" id="log"></div>
+                <div class="controls">
+                    <button class="btn-secondary" onclick="clearLog()">Clear Log</button>
+                    <button class="btn-primary" onclick="sendPing()">Send Ping</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let eventCount = 0;
+        let fileCount = 0;
+        let totalBytes = 0;
+        
+        const wsUrl = 'ws://localhost:8000/ws';
+        
+        function updateStatus(status, text) {
+            const statusEl = document.getElementById('connectionStatus');
+            statusEl.className = `status ${status}`;
+            statusEl.textContent = text;
+        }
+        
+        function addLog(message, type = 'info') {
+            const log = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-message">${message}</span>`;
+            log.insertBefore(entry, log.firstChild);
+            
+            // Keep only last 50 entries
+            while (log.children.length > 50) {
+                log.removeChild(log.lastChild);
+            }
+        }
+        
+        function addEvent(data) {
+            const eventsContainer = document.getElementById('events');
+            const event = document.createElement('div');
+            event.className = 'event';
+            
+            const time = new Date(data.timestamp).toLocaleTimeString();
+            const size = data.size ? (data.size / 1024).toFixed(2) + ' KB' : 'Unknown';
+            
+            event.innerHTML = `
+                <div class="event-header">
+                    <span class="event-type">${data.type || 'Unknown'}</span>
+                    <span class="event-time">${time}</span>
+                </div>
+                <div class="event-details">
+                    <div><span class="event-key">Bucket:</span>${data.bucket}</div>
+                    <div><span class="event-key">Key:</span>${data.key}</div>
+                    <div><span class="event-key">Size:</span>${size}</div>
+                    ${data.content_type ? `<div><span class="event-key">Type:</span>${data.content_type}</div>` : ''}
+                </div>
+            `;
+            
+            eventsContainer.insertBefore(event, eventsContainer.firstChild);
+            
+            // Keep only last 10 events
+            while (eventsContainer.children.length > 10) {
+                eventsContainer.removeChild(eventsContainer.lastChild);
+            }
+            
+            // Update stats
+            eventCount++;
+            if (data.type === 'new_upload') {
+                fileCount++;
+            }
+            if (data.size) {
+                totalBytes += data.size;
+            }
+            updateStats();
+        }
+        
+        function updateStats() {
+            document.getElementById('totalEvents').textContent = eventCount;
+            document.getElementById('filesUploaded').textContent = fileCount;
+            document.getElementById('totalSize').textContent = (totalBytes / 1024).toFixed(2) + ' KB';
+        }
+        
+        function connect() {
+            if (ws && ws.readyState !== WebSocket.CLOSED) {
+                addLog('⚠️ Already connected or connecting', 'warning');
+                return;
+            }
+            
+            updateStatus('connecting', 'Connecting...');
+            addLog('🔌 Connecting to ' + wsUrl);
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                updateStatus('connected', 'Connected');
+                addLog('✅ Connected successfully');
+            };
+            
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    addLog(`📨 Received: ${data.type || 'message'}`, 'info');
+                    
+                    if (data.type === 'new_upload') {
+                        addEvent(data);
+                    } else if (data.type === 'connection') {
+                        addLog(`💬 Server: ${data.message}`);
+                    } else if (data.type === 'pong') {
+                        addLog('🏓 Pong received');
+                    }
+                } catch (error) {
+                    addLog(`❌ Error parsing message: ${error.message}`, 'error');
+                }
+            };
+            
+            ws.onerror = (error) => {
+                addLog('❌ WebSocket error occurred', 'error');
+                console.error('WebSocket error:', error);
+            };
+            
+            ws.onclose = () => {
+                updateStatus('disconnected', 'Disconnected');
+                addLog('🔌 Connection closed');
+            };
+        }
+        
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+                addLog('👋 Disconnected by user');
+            }
+        }
+        
+        function sendPing() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const message = JSON.stringify({ type: 'ping' });
+                ws.send(message);
+                addLog('🏓 Ping sent');
+            } else {
+                addLog('⚠️ Not connected', 'warning');
+            }
+        }
+        
+        function clearEvents() {
+            document.getElementById('events').innerHTML = '';
+            eventCount = 0;
+            fileCount = 0;
+            totalBytes = 0;
+            updateStats();
+            addLog('🗑️ Events cleared');
+        }
+        
+        function clearLog() {
+            document.getElementById('log').innerHTML = '';
+        }
+        
+        // Auto-connect on page load
+        window.addEventListener('load', () => {
+            addLog('👋 Dashboard loaded');
+            addLog('💡 Click "Connect" to start monitoring');
+        });
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (ws) {
+                ws.close();
+            }
+        });
+    </script>
+</body>
+</html>
