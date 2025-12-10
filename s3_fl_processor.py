@@ -5,6 +5,7 @@ Monitors S3 bucket for FL session files, downloads them, stores in SQLite, and b
 
 import json
 import os
+import gzip
 import hashlib
 from pathlib import Path
 from datetime import datetime
@@ -90,10 +91,18 @@ class S3FLFileProcessor:
         )
     
     async def _download_from_s3(self, bucket: str, key: str) -> Optional[str]:
-        """Download file content from S3"""
+        """Download file content from S3 (handles gzip compression)"""
         try:
-            response = s3_client.get_object(Bucket=bucket, Key=key)
-            content = response['Body'].read().decode('utf-8')
+            response = s3_client.s3_client.get_object(Bucket=bucket, Key=key)
+            content_bytes = response['Body'].read()
+            
+            # Check if content is gzip-compressed (starts with 0x1f8b)
+            if content_bytes[:2] == b'\x1f\x8b':
+                print(f"🗜️  Decompressing gzip file: {key}")
+                content = gzip.decompress(content_bytes).decode('utf-8')
+            else:
+                content = content_bytes.decode('utf-8')
+            
             return content
         except Exception as e:
             print(f"Error downloading from S3: {e}")

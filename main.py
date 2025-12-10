@@ -92,7 +92,7 @@ async def startup_event():
         logger.warning(f"Redis not available: {e}")
     
     # Initialize FL Session Watcher
-    sessions_path = os.getenv("FL_SESSIONS_PATH", "../sessions")
+    sessions_path = os.getenv("FL_SESSIONS_PATH", "sessions")
     fl_watcher = FLSessionWatcher(manager, sessions_path)
     await fl_watcher.start()
     
@@ -150,21 +150,28 @@ async def lambda_webhook(
     logger.info(f"Received Lambda webhook for event: {payload.event_id}")
     
     try:
-        # Store event in database
-        db_event = S3Event(
-            event_id=payload.event_id,
-            bucket=payload.bucket,
-            key=payload.key,
-            event_name=payload.event_name,
-            event_time=datetime.fromisoformat(payload.event_time.replace('Z', '+00:00')),
-            file_size=payload.size,
-            content_type=payload.content_type,
-            event_metadata=payload.metadata,
-            processed=0
-        )
-        db.add(db_event)
-        db.commit()
-        db.refresh(db_event)
+        # Check if event already exists (Lambda may send duplicates)
+        existing_event = db.query(S3Event).filter(S3Event.event_id == payload.event_id).first()
+        
+        if existing_event:
+            logger.info(f"Event {payload.event_id} already exists, skipping duplicate")
+            db_event = existing_event
+        else:
+            # Store new event in database
+            db_event = S3Event(
+                event_id=payload.event_id,
+                bucket=payload.bucket,
+                key=payload.key,
+                event_name=payload.event_name,
+                event_time=datetime.fromisoformat(payload.event_time.replace('Z', '+00:00')),
+                file_size=payload.size,
+                content_type=payload.content_type,
+                event_metadata=payload.metadata,
+                processed=0
+            )
+            db.add(db_event)
+            db.commit()
+            db.refresh(db_event)
         
         # Store in Redis for quick access (optional)
         try:
@@ -195,7 +202,7 @@ async def lambda_webhook(
         }
         await manager.broadcast(ws_message)
         
-        # Process FL session file if applicable
+        # Process FL session file if applicable (wait for download to complete)
         if s3_processor:
             event_data = {
                 "event_id": payload.event_id,
@@ -204,9 +211,8 @@ async def lambda_webhook(
                 "event_name": payload.event_name,
                 "event_time": payload.event_time
             }
-            # Process asynchronously
-            import asyncio
-            asyncio.create_task(s3_processor.process_s3_event(event_data, db))
+            # Process synchronously - wait for download and processing to complete
+            await s3_processor.process_s3_event(event_data, db)
         
         logger.info(f"Event {payload.event_id} processed and broadcasted")
         
@@ -719,8 +725,8 @@ async def get_global_metrics(db: Session = Depends(get_db)):
     try:
         # Get latest session
         latest_session = db.query(FileContent).filter(
-            FileContent.filename.like("%summary.json")
-        ).order_by(FileContent.uploaded_at.desc()).first()
+            FileContent.s3_key.like("%summary.json")
+        ).order_by(FileContent.stored_at.desc()).first()
         
         if not latest_session:
             return {"success": False, "error": "No active simulation"}
@@ -750,8 +756,8 @@ async def get_training_rounds(
     """Get training round history."""
     try:
         latest_session = db.query(FileContent).filter(
-            FileContent.filename.like("%summary.json")
-        ).order_by(FileContent.uploaded_at.desc()).first()
+            FileContent.s3_key.like("%summary.json")
+        ).order_by(FileContent.stored_at.desc()).first()
         
         if not latest_session:
             return {"success": True, "data": {"rounds": [], "total": 0, "timestamp": datetime.utcnow().isoformat() + "Z"}}
@@ -810,8 +816,8 @@ async def get_clients(
     """Get all clients with optional filtering."""
     try:
         latest_session = db.query(FileContent).filter(
-            FileContent.filename.like("%summary.json")
-        ).order_by(FileContent.uploaded_at.desc()).first()
+            FileContent.s3_key.like("%summary.json")
+        ).order_by(FileContent.stored_at.desc()).first()
         
         if not latest_session:
             return {"success": True, "data": {"clients": [], "total": 0, "timestamp": datetime.utcnow().isoformat() + "Z"}}
@@ -880,8 +886,8 @@ async def get_alerts(
     """Get security alerts."""
     try:
         latest_session = db.query(FileContent).filter(
-            FileContent.filename.like("%summary.json")
-        ).order_by(FileContent.uploaded_at.desc()).first()
+            FileContent.s3_key.like("%summary.json")
+        ).order_by(FileContent.stored_at.desc()).first()
         
         if not latest_session:
             return {"success": True, "data": {"alerts": [], "total": 0, "timestamp": datetime.utcnow().isoformat() + "Z"}}
@@ -931,8 +937,8 @@ async def get_defense_metrics(db: Session = Depends(get_db)):
     """Get defense system metrics."""
     try:
         latest_session = db.query(FileContent).filter(
-            FileContent.filename.like("%summary.json")
-        ).order_by(FileContent.uploaded_at.desc()).first()
+            FileContent.s3_key.like("%summary.json")
+        ).order_by(FileContent.stored_at.desc()).first()
         
         if not latest_session:
             return {"success": False, "error": "No active simulation"}
@@ -1003,8 +1009,8 @@ async def get_logs(
     """Get system logs."""
     try:
         latest_session = db.query(FileContent).filter(
-            FileContent.filename.like("%summary.json")
-        ).order_by(FileContent.uploaded_at.desc()).first()
+            FileContent.s3_key.like("%summary.json")
+        ).order_by(FileContent.stored_at.desc()).first()
         
         if not latest_session:
             return {"success": True, "data": {"logs": [], "total": 0, "timestamp": datetime.utcnow().isoformat() + "Z"}}
