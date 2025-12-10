@@ -29,6 +29,44 @@ app = FastAPI(title="S3 Event Processing API", version="1.0.0")
 # FL Session Watcher
 fl_watcher = None
 
+
+# ============================================================================
+# DATA TRANSFORMATION ADAPTERS
+# ============================================================================
+
+def normalize_value(value, default=0.0):
+    """Normalize null/None values to default."""
+    return default if value is None else float(value)
+
+
+def transform_to_global_metrics(round_data):
+    """Transform round JSON to GlobalMetrics format."""
+    metadata = round_data.get("metadata", {})
+    global_metrics = round_data.get("globalMetrics", {})
+    round_summary = round_data.get("roundSummary", {})
+    
+    # Get accuracy with fallback logic
+    accuracy = global_metrics.get("accuracy") or round_summary.get("accuracy")
+    if accuracy is None:
+        # Compute from active clients
+        clients = round_data.get("clients", [])
+        active = [c for c in clients if c.get("accuracy") is not None]
+        accuracy = sum(c["accuracy"] for c in active) / len(active) if active else 0.0
+    
+    accuracy_percent = normalize_value(accuracy) * 100
+    loss = global_metrics.get("loss") or round_summary.get("loss")
+    
+    return {
+        "accuracy": round(accuracy_percent, 2),
+        "loss": round(normalize_value(loss), 4),
+        "currentRound": metadata.get("round", 0),
+        "totalClients": global_metrics.get("totalClients", 0),
+        "activeMaliciousClients": global_metrics.get("activeMaliciousClients", 0),
+        "defenseSuccessRate": round(normalize_value(global_metrics.get("defenseSuccessRate")), 2),
+        "isConnected": True,
+        "timestamp": metadata.get("timestamp", datetime.utcnow().isoformat() + "Z")
+    }
+
 # S3 FL File Processor
 s3_processor = None
 
@@ -58,7 +96,7 @@ async def startup_event():
         logger.warning(f"Redis not available: {e}")
     
     # Initialize FL Session Watcher
-    sessions_path = os.getenv("FL_SESSIONS_PATH", "../sessions")
+    sessions_path = os.getenv("FL_SESSIONS_PATH", "sessions")
     fl_watcher = FLSessionWatcher(manager, sessions_path)
     await fl_watcher.start()
     
@@ -116,21 +154,28 @@ async def lambda_webhook(
     logger.info(f"Received Lambda webhook for event: {payload.event_id}")
     
     try:
-        # Store event in database
-        db_event = S3Event(
-            event_id=payload.event_id,
-            bucket=payload.bucket,
-            key=payload.key,
-            event_name=payload.event_name,
-            event_time=datetime.fromisoformat(payload.event_time.replace('Z', '+00:00')),
-            file_size=payload.size,
-            content_type=payload.content_type,
-            event_metadata=payload.metadata,
-            processed=0
-        )
-        db.add(db_event)
-        db.commit()
-        db.refresh(db_event)
+        # Check if event already exists (Lambda may send duplicates)
+        existing_event = db.query(S3Event).filter(S3Event.event_id == payload.event_id).first()
+        
+        if existing_event:
+            logger.info(f"Event {payload.event_id} already exists, skipping duplicate")
+            db_event = existing_event
+        else:
+            # Store new event in database
+            db_event = S3Event(
+                event_id=payload.event_id,
+                bucket=payload.bucket,
+                key=payload.key,
+                event_name=payload.event_name,
+                event_time=datetime.fromisoformat(payload.event_time.replace('Z', '+00:00')),
+                file_size=payload.size,
+                content_type=payload.content_type,
+                event_metadata=payload.metadata,
+                processed=0
+            )
+            db.add(db_event)
+            db.commit()
+            db.refresh(db_event)
         
         # Store in Redis for quick access (optional)
         try:
@@ -161,7 +206,7 @@ async def lambda_webhook(
         }
         await manager.broadcast(ws_message)
         
-        # Process FL session file if applicable
+        # Process FL session file if applicable (wait for download to complete)
         if s3_processor:
             event_data = {
                 "event_id": payload.event_id,
@@ -170,9 +215,8 @@ async def lambda_webhook(
                 "event_name": payload.event_name,
                 "event_time": payload.event_time
             }
-            # Process asynchronously
-            import asyncio
-            asyncio.create_task(s3_processor.process_s3_event(event_data, db))
+            # Process synchronously - wait for download and processing to complete
+            await s3_processor.process_s3_event(event_data, db)
         
         logger.info(f"Event {payload.event_id} processed and broadcasted")
         
@@ -281,7 +325,7 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         # Send initial connection message
         await manager.send_personal_message({
-            "type": "connection",
+            "type": "CONNECTED",
             "message": "Connected to S3 Event Stream",
             "timestamp": datetime.utcnow().isoformat()
         }, websocket)
@@ -584,14 +628,6 @@ async def get_s3_events(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/sessions/{session_id}/rounds/{round_num}")
-    
-    if not data:
-        raise HTTPException(status_code=404, detail="Round data not found")
-    
-    return data
-
-
 @app.get("/api/db/sessions")
 async def get_db_sessions(db: Session = Depends(get_db)):
     """Get all FL sessions stored in database"""
@@ -681,4 +717,376 @@ async def manually_process_s3_file(event_id: str, db: Session = Depends(get_db))
         "status": "success",
         "message": f"File {event.key} processed successfully"
     }
+
+
+# ============================================================================
+# DASHBOARD-COMPATIBLE API ENDPOINTS
+# ============================================================================
+
+@app.get("/api/metrics/global")
+async def get_global_metrics(db: Session = Depends(get_db)):
+    """Get global model metrics from latest round."""
+    try:
+        # Get latest session
+        latest_session = db.query(FileContent).filter(
+            FileContent.s3_key.like("%summary.json")
+        ).order_by(FileContent.stored_at.desc()).first()
+        
+        if not latest_session:
+            return {"success": False, "error": "No active simulation"}
+        
+        summary = json.loads(latest_session.content)
+        round_history = summary.get("roundHistory", [])
+        
+        if not round_history:
+            return {"success": False, "error": "No rounds available"}
+        
+        # Get latest round
+        latest_round = round_history[-1]
+        metrics = transform_to_global_metrics(latest_round)
+        
+        return {"success": True, "data": metrics}
+    except Exception as e:
+        logger.error(f"Error getting global metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/training/rounds")
+async def get_training_rounds(
+    limit: Optional[int] = None,
+    offset: int = 0,
+    db: Session = Depends(get_db)
+):
+    """Get training round history."""
+    try:
+        latest_session = db.query(FileContent).filter(
+            FileContent.s3_key.like("%summary.json")
+        ).order_by(FileContent.stored_at.desc()).first()
+        
+        if not latest_session:
+            return {"success": True, "data": {"rounds": [], "total": 0, "timestamp": datetime.utcnow().isoformat() + "Z"}}
+        
+        summary = json.loads(latest_session.content)
+        round_history = summary.get("roundHistory", [])
+        
+        rounds = []
+        for round_data in round_history:
+            metadata = round_data.get("metadata", {})
+            round_summary = round_data.get("roundSummary", {})
+            global_metrics = round_data.get("globalMetrics", {})
+            
+            accuracy = round_summary.get("accuracy") or global_metrics.get("accuracy")
+            if accuracy is None:
+                clients = round_data.get("clients", [])
+                active = [c for c in clients if c.get("accuracy") is not None]
+                accuracy = sum(c["accuracy"] for c in active) / len(active) if active else 0.0
+            
+            rounds.append({
+                "round": metadata.get("round", 0),
+                "accuracy": round(normalize_value(accuracy) * 100, 2),
+                "loss": round(normalize_value(round_summary.get("loss") or global_metrics.get("loss")), 4),
+                "defenseApplied": round_summary.get("defenseApplied", False),
+                "maliciousClientsDetected": round_summary.get("maliciousClientsDetected", 0)
+            })
+        
+        # Apply offset and limit
+        total = len(rounds)
+        if offset:
+            rounds = rounds[offset:]
+        if limit:
+            rounds = rounds[:limit]
+        
+        return {
+            "success": True,
+            "data": {
+                "rounds": rounds,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting training rounds: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/clients")
+async def get_clients(
+    type: Optional[str] = None,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Get all clients with optional filtering."""
+    try:
+        latest_session = db.query(FileContent).filter(
+            FileContent.s3_key.like("%summary.json")
+        ).order_by(FileContent.stored_at.desc()).first()
+        
+        if not latest_session:
+            return {"success": True, "data": {"clients": [], "total": 0, "timestamp": datetime.utcnow().isoformat() + "Z"}}
+        
+        summary = json.loads(latest_session.content)
+        round_history = summary.get("roundHistory", [])
+        
+        if not round_history:
+            return {"success": True, "data": {"clients": [], "total": 0, "timestamp": datetime.utcnow().isoformat() + "Z"}}
+        
+        # Get latest round's clients
+        latest_round = round_history[-1]
+        clients = latest_round.get("clients", [])
+        
+        formatted_clients = []
+        for client in clients:
+            if type and client.get("type", "").lower() != type.lower():
+                continue
+            
+            # Normalize trust score
+            trust_score = client.get("trustScore")
+            if trust_score is None:
+                status_val = client.get("status", "Inactive")
+                trust_score = 0.8 if status_val == "Active" else 0.5 if status_val == "Warning" else 0.3
+            
+            client_data = {
+                "id": client.get("id", "unknown"),
+                "type": client.get("type", "Unknown"),
+                "status": client.get("status", "Inactive"),
+                "trustScore": round(float(trust_score), 2),
+                "accuracy": round(normalize_value(client.get("accuracy")) * 100, 2),
+                "loss": round(normalize_value(client.get("loss")), 4),
+                "divergence": round(normalize_value(client.get("divergence")), 4),
+                "learningRate": client.get("learningRate", 0.01),
+                "epochs": client.get("epochs", 5)
+            }
+            
+            if client.get("attackType"):
+                client_data["attackType"] = client["attackType"]
+            
+            if status and client_data["status"] != status:
+                continue
+            
+            formatted_clients.append(client_data)
+        
+        return {
+            "success": True,
+            "data": {
+                "clients": formatted_clients,
+                "total": len(formatted_clients),
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting clients: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/alerts")
+async def get_alerts(
+    severity: Optional[str] = None,
+    type: Optional[str] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db)
+):
+    """Get security alerts."""
+    try:
+        latest_session = db.query(FileContent).filter(
+            FileContent.s3_key.like("%summary.json")
+        ).order_by(FileContent.stored_at.desc()).first()
+        
+        if not latest_session:
+            return {"success": True, "data": {"alerts": [], "total": 0, "timestamp": datetime.utcnow().isoformat() + "Z"}}
+        
+        summary = json.loads(latest_session.content)
+        round_history = summary.get("roundHistory", [])
+        
+        all_alerts = []
+        for round_data in round_history:
+            round_alerts = round_data.get("alerts", [])
+            for alert in round_alerts:
+                if severity and alert.get("severity") != severity:
+                    continue
+                if type and alert.get("type") != type:
+                    continue
+                
+                all_alerts.append({
+                    "id": alert.get("id", ""),
+                    "round": alert.get("round", 0),
+                    "clientId": alert.get("clientId", ""),
+                    "type": alert.get("type", "unknown"),
+                    "severity": alert.get("severity", "medium"),
+                    "message": alert.get("message", ""),
+                    "timestamp": alert.get("timestamp", ""),
+                    "acknowledged": alert.get("acknowledged", False)
+                })
+        
+        # Sort by timestamp descending
+        all_alerts.sort(key=lambda x: x["timestamp"], reverse=True)
+        all_alerts = all_alerts[:limit]
+        
+        return {
+            "success": True,
+            "data": {
+                "alerts": all_alerts,
+                "total": len(all_alerts),
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting alerts: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/defense/metrics")
+async def get_defense_metrics(db: Session = Depends(get_db)):
+    """Get defense system metrics."""
+    try:
+        latest_session = db.query(FileContent).filter(
+            FileContent.s3_key.like("%summary.json")
+        ).order_by(FileContent.stored_at.desc()).first()
+        
+        if not latest_session:
+            return {"success": False, "error": "No active simulation"}
+        
+        summary = json.loads(latest_session.content)
+        round_history = summary.get("roundHistory", [])
+        
+        if not round_history:
+            return {"success": False, "error": "No rounds available"}
+        
+        latest_round = round_history[-1]
+        defense_metrics = latest_round.get("defenseMetrics", {})
+        confusion_matrix = latest_round.get("confusionMatrix", {})
+        clients = latest_round.get("clients", [])
+        
+        # Build trust score distribution
+        trust_dist = [
+            {"range": "0.0-0.2", "count": 0}, 
+            {"range": "0.2-0.4", "count": 0}, 
+            {"range": "0.4-0.6", "count": 0}, 
+            {"range": "0.6-0.8", "count": 0}, 
+            {"range": "0.8-1.0", "count": 0}
+        ]
+        
+        for client in clients:
+            trust_score = client.get("trustScore")
+            if trust_score is None:
+                status = client.get("status", "Inactive")
+                trust_score = 0.8 if status == "Active" else 0.5 if status == "Warning" else 0.3
+            
+            trust_score = float(trust_score)
+            idx = min(int(trust_score * 5), 4)
+            trust_dist[idx]["count"] += 1
+        
+        return {
+            "success": True,
+            "data": {
+                "metrics": {
+                    "detectionRate": round(normalize_value(defense_metrics.get("recall")) * 100, 1),
+                    "falsePositiveRate": round(normalize_value(defense_metrics.get("falsePositiveRate")), 1),
+                    "precision": round(normalize_value(defense_metrics.get("precision")) * 100, 1),
+                    "recall": round(normalize_value(defense_metrics.get("recall")) * 100, 1),
+                    "defenseOverhead": round(normalize_value(defense_metrics.get("defenseOverhead")), 2),
+                    "attackImpactReduction": round(normalize_value(defense_metrics.get("attackImpactReduction")), 1)
+                },
+                "trustScoreDistribution": trust_dist,
+                "confusionMatrix": {
+                    "truePositive": confusion_matrix.get("truePositive", 0),
+                    "falsePositive": confusion_matrix.get("falsePositive", 0),
+                    "trueNegative": confusion_matrix.get("trueNegative", 0),
+                    "falseNegative": confusion_matrix.get("falseNegative", 0)
+                },
+                "timestamp": latest_round.get("metadata", {}).get("timestamp", datetime.utcnow().isoformat() + "Z")
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting defense metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/logs")
+async def get_logs(
+    level: Optional[str] = None,
+    limit: int = 100,
+    since: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Get system logs."""
+    try:
+        latest_session = db.query(FileContent).filter(
+            FileContent.s3_key.like("%summary.json")
+        ).order_by(FileContent.stored_at.desc()).first()
+        
+        if not latest_session:
+            return {"success": True, "data": {"logs": [], "total": 0, "timestamp": datetime.utcnow().isoformat() + "Z"}}
+        
+        summary = json.loads(latest_session.content)
+        round_history = summary.get("roundHistory", [])
+        
+        logs = []
+        log_id = 1
+        
+        for round_data in round_history:
+            metadata = round_data.get("metadata", {})
+            round_num = metadata.get("round", 0)
+            timestamp = metadata.get("timestamp", "")
+            round_summary = round_data.get("roundSummary", {})
+            
+            # Round start
+            logs.append({
+                "id": f"log_{log_id}", 
+                "timestamp": timestamp, 
+                "level": "info", 
+                "message": f"Round {round_num} started"
+            })
+            log_id += 1
+            
+            # Defense detection
+            if round_summary.get("defenseApplied"):
+                detected = round_summary.get("maliciousClientsDetected", 0)
+                log_level = "warning" if detected > 0 else "info"
+                if not level or log_level == level:
+                    logs.append({
+                        "id": f"log_{log_id}", 
+                        "timestamp": timestamp, 
+                        "level": log_level,
+                        "message": f"Defense detected {detected} malicious client(s) in round {round_num}"
+                    })
+                log_id += 1
+            
+            # Alerts
+            for alert in round_data.get("alerts", []):
+                alert_level = "error" if alert.get("severity") == "high" else "warning"
+                if not level or alert_level == level:
+                    logs.append({
+                        "id": f"log_{log_id}", 
+                        "timestamp": alert.get("timestamp", timestamp),
+                        "level": alert_level, 
+                        "message": alert.get("message", "")
+                    })
+                log_id += 1
+            
+            # Round complete
+            duration = round_summary.get("duration", 0)
+            logs.append({
+                "id": f"log_{log_id}", 
+                "timestamp": timestamp, 
+                "level": "info",
+                "message": f"Round {round_num} completed in {duration:.2f}s"
+            })
+            log_id += 1
+        
+        logs.sort(key=lambda x: x["timestamp"], reverse=True)
+        logs = logs[:limit]
+        
+        return {
+            "success": True,
+            "data": {
+                "logs": logs,
+                "total": len(logs),
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting logs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 

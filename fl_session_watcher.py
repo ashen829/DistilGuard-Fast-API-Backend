@@ -52,7 +52,7 @@ class SessionFileHandler(FileSystemEventHandler):
             
             # Prepare broadcast message
             message = {
-                "type": "round_update",
+                "type": "ROUND_COMPLETE",
                 "event": event_type,
                 "sessionId": session_id,
                 "round": round_num,
@@ -83,7 +83,7 @@ class SessionFileHandler(FileSystemEventHandler):
                 summary_data = json.load(f)
             
             message = {
-                "type": "session_summary",
+                "type": "TRAINING_COMPLETE",
                 "timestamp": datetime.now().isoformat(),
                 "data": summary_data
             }
