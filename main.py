@@ -14,6 +14,7 @@ from aws_client import s3_client
 from websocket_manager import manager
 from fl_session_watcher import FLSessionWatcher
 from s3_fl_processor import S3FLFileProcessor
+from chatbot_router import router as chatbot_router
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -39,6 +40,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include chatbot router
+app.include_router(chatbot_router, prefix="/api")
 
 
 @app.on_event("startup")

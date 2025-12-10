@@ -1,1 +1,4 @@
 .env
+
+chatbot_app/models_cache/
+__pycache__/
