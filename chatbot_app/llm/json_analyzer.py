@@ -24,7 +24,7 @@ except ImportError:
     logger = logging.getLogger(__name__)
     logger.warning("boto3 not installed - S3 functionality disabled. Install with: pip install boto3")
 
-from app.llm.models import RoundData, ClientRecord, Features
+from chatbot_app.llm.models import RoundData, ClientRecord, Features
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +279,87 @@ class JSONAnalyzer:
         logger.info(f"Selected first 3 clients (default)")
         return clients[:3]
     
+    def get_client_with_top_shap_features(self, client_id: int, top_n: int = 5) -> Optional[str]:
+        """
+        Get client information with top N SHAP features for LLM context.
+        
+        Args:
+            client_id: Client ID to get info for
+            top_n: Number of top SHAP features to return
+        
+        Returns:
+            Natural language description with top SHAP features
+        """
+        if not self.data:
+            return None
+        
+        try:
+            # Find client in current round data
+            matching_clients = [c for c in self.data.clients if c.client_id == client_id]
+            
+            if not matching_clients:
+                logger.warning(f"Client {client_id} not found in round {self.data.round_num}")
+                return None
+            
+            client = matching_clients[0]
+            
+            # Build description with top SHAP features
+            classification = client.classification.capitalize()
+            confidence_pct = client.malicious_probability * 100
+            
+            desc = f"**Client {client_id} Analysis**\n\n"
+            desc += f"Classification: {classification} ({confidence_pct:.2f}% confidence)\n"
+            desc += f"Round: {self.data.round_num}\n\n"
+            
+            # Get top N features by SHAP value
+            if client.shap_values and client.shap_values.feature_shap_values:
+                shap_dict = client.shap_values.feature_shap_values
+                features_dict = {
+                    k: v for k, v in vars(client.features).items() 
+                    if not k.startswith('_')
+                }
+                
+                # Sort by absolute SHAP value
+                sorted_features = sorted(
+                    shap_dict.items(),
+                    key=lambda x: abs(float(x[1])) if x[1] is not None else 0,
+                    reverse=True
+                )[:top_n]
+                
+                desc += "**Top Contributing Features (SHAP):**\n\n"
+                
+                for idx, (feature_name, shap_value) in enumerate(sorted_features, 1):
+                    feature_value = features_dict.get(feature_name, "N/A")
+                    
+                    # Format feature value
+                    if isinstance(feature_value, float):
+                        if abs(feature_value) < 0.0001 or abs(feature_value) > 100000:
+                            feat_str = f"{feature_value:.2e}"
+                        else:
+                            feat_str = f"{feature_value:.6f}"
+                    else:
+                        feat_str = str(feature_value)
+                    
+                    # Format SHAP value
+                    if isinstance(shap_value, float):
+                        if abs(shap_value) < 0.0001 or abs(shap_value) > 100000:
+                            shap_str = f"{shap_value:.2e}"
+                        else:
+                            shap_str = f"{shap_value:.6f}"
+                    else:
+                        shap_str = str(shap_value)
+                    
+                    desc += f"{idx}. **{feature_name}**: Value={feat_str}, SHAP={shap_str}\n"
+            else:
+                desc += "No SHAP analysis available for this client."
+            
+            logger.info(f"Generated SHAP context for client {client_id}")
+            return desc
+            
+        except Exception as e:
+            logger.error(f"Error getting client SHAP features: {e}", exc_info=True)
+            return None
+    
     def get_context_for_question(self, question: str) -> Tuple[str, bool]:
         """
         Get context for the question.
@@ -325,6 +406,6 @@ def get_json_analyzer() -> JSONAnalyzer:
     """Get or initialize the JSON analyzer"""
     global _analyzer
     if _analyzer is None:
-        from app.config import FL_DATA_S3_PATH, FL_DATA_LOCAL_PATH
+        from chatbot_app.config import FL_DATA_S3_PATH, FL_DATA_LOCAL_PATH
         _analyzer = JSONAnalyzer(s3_path=FL_DATA_S3_PATH, local_path=FL_DATA_LOCAL_PATH)
     return _analyzer

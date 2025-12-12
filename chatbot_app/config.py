@@ -27,12 +27,10 @@ HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", 8000))
 DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
 
-# Data Sources - JSON (primary) and CSV (fallback)
-# Set FL_DATA_S3_PATH to download from S3: "s3://bucket-name/path/to/file.json"
-# Set FL_DATA_LOCAL_PATH for local JSON file (default: /home/fyp-llm-25/fyp-llm-25/Reasoning/fl_data.json)
-FL_DATA_S3_PATH = os.environ.get("FL_DATA_S3_PATH")
-FL_DATA_LOCAL_PATH = os.environ.get("FL_DATA_LOCAL_PATH", "/home/fyp-llm-25/fyp-llm-25/chatbot_project/app/data/round_002_shap(5).json")
-FL_DATA_CSV_PATH = os.environ.get("FL_DATA_CSV_PATH", "/home/fyp-llm-25/fyp-llm-25/Reasoning/5gnidd_10_clietns_test_constant_noise_with_predictions_and_shap.csv")
+# Data Sources - SHAP CSV from latest session
+# The chatbot automatically finds the latest session folder and reads shap_analysis.csv
+# Sessions are stored in: ../sessions/{session_id}/shap_analysis.csv
+SESSIONS_PATH = PROJECT_ROOT.parent / "sessions"
 
 # S3 Configuration (optional)
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")

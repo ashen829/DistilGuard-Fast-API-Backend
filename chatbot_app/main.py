@@ -5,8 +5,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 
-from app.api.routes import router
-from app.config import HOST, PORT, DEBUG
+from chatbot_app.api.routes import router
+from chatbot_app.config import HOST, PORT, DEBUG
 
 # Setup logging
 logging.basicConfig(
@@ -52,7 +52,7 @@ async def startup_event():
     logger.info("Application starting up...")
     try:
         # Initialize CSV/JSON Q&A agent (loads LLM + data sources)
-        from app.llm.agent import get_agent
+        from chatbot_app.llm.agent import get_agent
         agent = get_agent()
         logger.info("✓ CSV/JSON Q&A agent initialized")
         

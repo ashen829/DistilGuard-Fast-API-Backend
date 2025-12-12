@@ -255,6 +255,6 @@ def get_csv_analyzer() -> CSVAnalyzer:
     """Get or initialize the CSV analyzer"""
     global _analyzer
     if _analyzer is None:
-        from app.config import FL_DATA_CSV_PATH
+        from chatbot_app.config import FL_DATA_CSV_PATH
         _analyzer = CSVAnalyzer(FL_DATA_CSV_PATH)
     return _analyzer
