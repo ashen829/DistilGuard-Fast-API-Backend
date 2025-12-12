@@ -4,8 +4,8 @@ import json
 from typing import Iterator, Optional, Dict, Any
 import torch
 
-from app.models.qwen_loader import QwenModelLoader
-from app.config import MAX_NEW_TOKENS, TEMPERATURE, TOP_P, REPETITION_PENALTY, DEVICE
+from chatbot_app.models.qwen_loader import QwenModelLoader
+from chatbot_app.config import MAX_NEW_TOKENS, TEMPERATURE, TOP_P, REPETITION_PENALTY, DEVICE
 
 logger = logging.getLogger(__name__)
 

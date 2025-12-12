@@ -1,4 +1,5 @@
 .env
 
-chatbot_app/models_cache/
+models_cache/
+sessions/
 __pycache__/

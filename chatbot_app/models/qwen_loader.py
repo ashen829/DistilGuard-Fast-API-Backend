@@ -3,7 +3,7 @@ import logging
 from typing import Optional
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from app.config import MODEL_NAME, MODEL_DIR, DEVICE
+from chatbot_app.config import MODEL_NAME, MODEL_DIR, DEVICE
 
 logger = logging.getLogger(__name__)
 
