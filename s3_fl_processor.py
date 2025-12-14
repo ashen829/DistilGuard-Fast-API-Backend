@@ -64,7 +64,7 @@ class S3FLFileProcessor:
             await self._store_in_database(event_id, key, file_content, json_data, db)
             
             # Save to local file system
-            local_path = await self._save_locally(key, json_data)
+            local_path = await self._save_locally(key, file_content, json_data)
             
             # Determine file type and broadcast appropriately
             if key.endswith('.csv'):
@@ -225,7 +225,7 @@ class S3FLFileProcessor:
             traceback.print_exc()
             db.rollback()
     
-    async def _save_locally(self, s3_key: str, json_data: Dict[str, Any]) -> Path:
+    async def _save_locally(self, s3_key: str, content: str, json_data: Optional[Dict[str, Any]]) -> Path:
         """Save file to local sessions directory"""
         try:
             # Extract session ID from S3 key path
@@ -234,32 +234,38 @@ class S3FLFileProcessor:
             session_id = parts[1] if len(parts) > 1 else datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             
             # Save based on file type
-            if s3_key.endswith('.csv'):
+            if s3_key.endswith('shap_analysis.csv'):
+                # ✅ Save the CSV content as-is
                 filename = os.path.basename(s3_key)
                 local_path = self.local_sessions_path / session_id / filename
-            elif 'shap_analysis' in s3_key:
-                # This shouldn't happen with CSV format, but keeping for compatibility
-                filename = os.path.basename(s3_key)
-                local_path = self.local_sessions_path / session_id / "shap_analysis" / filename
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(local_path, 'w', encoding='utf-8') as f:
+                    f.write(content)  # write raw CSV content
+
             elif 'round_' in s3_key:
                 # Extract round number
                 round_num = json_data.get('metadata', {}).get('round', 1) if json_data else 1
                 filename = f"round_{round_num:03d}.json"
                 local_path = self.local_sessions_path / session_id / "rounds" / filename
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(local_path, 'w', encoding='utf-8') as f:
+                    json.dump(json_data, f, indent=2)
+
             elif 'summary' in s3_key:
                 filename = "summary.json"
                 local_path = self.local_sessions_path / session_id / filename
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(local_path, 'w', encoding='utf-8') as f:
+                    json.dump(json_data, f, indent=2)
+
             else:
+                # Other CSV or files
                 filename = os.path.basename(s3_key)
                 local_path = self.local_sessions_path / session_id / filename
-            
-            # Create directory structure
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Write file
-            with open(local_path, 'w') as f:
-                f.write(json_data) if isinstance(json_data, str) else json.dump(json_data, f, indent=2)
-            
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(local_path, 'w', encoding='utf-8') as f:
+                    f.write(content)  # write raw content
+                                    
             print(f"💾 Saved locally: {local_path}")
             return local_path
             
