@@ -277,7 +277,7 @@ class S3FLFileProcessor:
         """Broadcast round update via WebSocket"""
         try:
             message = {
-                "type": "round_update",
+                "type": "ROUND_COMPLETE",
                 "source": "s3",
                 "event": "s3_download",
                 "sessionId": round_data.get('metadata', {}).get('sessionId'),
