@@ -783,7 +783,7 @@ async def get_training_rounds(
             
             rounds.append({
                 "round": metadata.get("round", 0),
-                "accuracy": round(normalize_value(accuracy) * 100, 2),
+                "accuracy": round(normalize_value(accuracy), 2),
                 "loss": round(normalize_value(round_summary.get("loss") or global_metrics.get("loss")), 4),
                 "defenseApplied": round_summary.get("defenseApplied", False),
                 "maliciousClientsDetected": round_summary.get("maliciousClientsDetected", 0)
