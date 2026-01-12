@@ -548,6 +548,221 @@ async def export_session_reports_to_pdf(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Generate Reports On-Demand
+# ============================================================================
+
+@router.post("/generate/session/{session_id}")
+async def generate_reports_for_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Trigger report generation for all malicious clients in a session.
+    
+    This reads the SHAP CSV file, extracts malicious clients per round,
+    gets top 5 contributing features, and generates LLM explanations.
+    
+    Only generates reports once per session. Returns existing reports if already generated.
+    
+    Path parameters:
+        session_id: FL session ID (e.g., '2026-01-12_19-31-02')
+    """
+    try:
+        from pathlib import Path
+        import pandas as pd
+        from io import StringIO
+        
+        # Check if reports already exist for this session
+        existing_reports = db.query(FLRoundReport).filter(
+            FLRoundReport.session_id == session_id
+        ).first()
+        
+        if existing_reports:
+            logger.info(f"✅ Reports already generated for session {session_id}, returning existing reports")
+            # Count reports per round
+            round_reports = db.query(FLRoundReport).filter(
+                FLRoundReport.session_id == session_id
+            ).all()
+            rounds = {}
+            for report in round_reports:
+                if report.round_number not in rounds:
+                    rounds[report.round_number] = 0
+                rounds[report.round_number] += 1
+            
+            return {
+                "success": True,
+                "session_id": session_id,
+                "rounds_processed": sorted(rounds.keys()),
+                "reports_generated": len(round_reports),
+                "message": f"Reports already exist for this session ({len(round_reports)} reports across {len(rounds)} rounds)",
+                "already_generated": True
+            }
+        
+        # Find SHAP CSV file
+        shap_csv_path = Path("./sessions") / session_id / "shap_analysis.csv"
+        
+        if not shap_csv_path.exists():
+            raise HTTPException(status_code=404, detail=f"SHAP CSV not found for session {session_id}")
+        
+        logger.info(f"📖 Reading SHAP CSV: {shap_csv_path}")
+        
+        # Load SHAP CSV
+        df = pd.read_csv(shap_csv_path)
+        logger.info(f"✅ Loaded {len(df)} records from SHAP CSV")
+        
+        if df.empty:
+            raise HTTPException(status_code=400, detail="SHAP CSV is empty")
+        
+        # Get generator
+        generator = get_report_generator()
+        
+        # Track processed (round, client) to avoid duplicates
+        processed_clients = set()
+        all_reports = []
+        rounds_processed = set()
+        
+        # Group by round
+        for _, row in df.iterrows():
+            try:
+                round_num = int(row.get('round_num', 0))
+                client_id = int(row.get('client_id', -1))
+                predicted_label = row.get('predicted_label', 'benign')
+                
+                # Check if malicious - handle both string and numeric formats
+                is_malicious = False
+                if isinstance(predicted_label, str):
+                    is_malicious = predicted_label.lower() == 'malicious'
+                elif isinstance(predicted_label, (int, float)):
+                    is_malicious = int(predicted_label) == 1
+                
+                if not is_malicious:
+                    continue
+                
+                # Skip duplicates in this round
+                client_key = (round_num, client_id)
+                if client_key in processed_clients:
+                    logger.info(f"⏭️  Skipping duplicate: Client {client_id} in Round {round_num}")
+                    continue
+                
+                processed_clients.add(client_key)
+                rounds_processed.add(round_num)
+                
+                logger.info(f"🎯 Found malicious client {client_id} in round {round_num}")
+                
+                # Build SHAP context for this client
+                # Get top 5 SHAP features for this client
+                client_data = df[df['client_id'] == client_id]
+                if client_data.empty:
+                    continue
+                
+                latest_client_row = client_data.iloc[-1]
+                
+                # Find all SHAP columns
+                shap_columns = [col for col in df.columns if col.startswith('SHAP_')]
+                
+                if shap_columns:
+                    # Extract SHAP values
+                    shap_values = {}
+                    for shap_col in shap_columns:
+                        val = latest_client_row[shap_col]
+                        if pd.notna(val):
+                            feature_col = shap_col.replace('SHAP_', '')
+                            shap_values[feature_col] = float(val)
+                    
+                    # Sort by absolute value and get top 5
+                    sorted_features = sorted(
+                        shap_values.items(),
+                        key=lambda x: abs(x[1]),
+                        reverse=True
+                    )[:5]
+                    
+                    # Build context string
+                    shap_context = f"**Client {client_id} - Round {round_num} Analysis**\n\n"
+                    shap_context += "**Top 5 Contributing Features (by SHAP value):**\n\n"
+                    
+                    for idx, (feature_name, shap_val) in enumerate(sorted_features, 1):
+                        feature_value = latest_client_row.get(feature_name)
+                        
+                        if pd.notna(feature_value):
+                            feat_val_str = f"{float(feature_value):.4f}"
+                        else:
+                            feat_val_str = "N/A"
+                        
+                        shap_val_str = f"{float(shap_val):.6f}"
+                        
+                        shap_context += f"{idx}. **{feature_name}**\n"
+                        shap_context += f"   - Feature value: {feat_val_str}\n"
+                        shap_context += f"   - SHAP contribution: {shap_val_str}\n"
+                else:
+                    # No SHAP columns, use simple context
+                    shap_context = f"Client {client_id} detected as malicious in round {round_num}"
+                
+                # Create minimal round data for report generation
+                round_data = {
+                    'metadata': {'round': round_num, 'sessionId': session_id},
+                    'clients': [{'client_id': client_id, 'clientId': client_id}]
+                }
+                
+                # Build prompt with SHAP context
+                prompt = f"""{shap_context}
+
+**Your Task:**
+Based on these top contributing features, explain in simple, non-technical language why this client is predicted to be malicious. 
+Focus on what the abnormal feature values reveal about suspicious behavior."""
+                
+                # Call LLM directly for explanation
+                try:
+                    from chatbot_app.llm.agent import get_agent
+                    agent = get_agent()
+                    if agent:
+                        logger.info(f"🤖 Generating explanation for client {client_id}")
+                        explanation = agent.process(prompt, [])
+                        if not explanation or explanation.startswith("Error"):
+                            logger.warning(f"LLM returned error or empty: {explanation}")
+                            explanation = f"Client {client_id} shows anomalous feature patterns indicating malicious behavior in round {round_num}."
+                    else:
+                        explanation = f"Client {client_id} detected as malicious based on SHAP analysis showing anomalous feature patterns in round {round_num}."
+                except Exception as e:
+                    logger.warning(f"Could not get LLM explanation: {e}")
+                    explanation = f"Client {client_id} detected as malicious based on SHAP analysis in round {round_num}."
+                
+                # Create and store report
+                report = FLRoundReport(
+                    session_id=session_id,
+                    round_number=round_num,
+                    client_id=client_id,
+                    malicious_score=None,
+                    explanation=explanation,
+                    created_at=datetime.utcnow()
+                )
+                
+                db.add(report)
+                db.commit()
+                all_reports.append(report)
+                logger.info(f"✅ Generated report for client {client_id} in round {round_num}")
+                
+            except Exception as e:
+                logger.warning(f"⚠️  Error processing row: {e}")
+                continue
+        
+        logger.info(f"\n✅ SHAP Report Generation Complete")
+        logger.info(f"   - Rounds processed: {len(rounds_processed)} ({sorted(rounds_processed)})")
+        logger.info(f"   - Total reports generated: {len(all_reports)}")
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+            "rounds_processed": sorted(rounds_processed),
+            "reports_generated": len(all_reports),
+            "message": f"Generated {len(all_reports)} reports from SHAP analysis"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating reports for session {session_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/export/round/{session_id}/{round_number}/csv")
 async def export_round_reports_to_csv(
     session_id: str,

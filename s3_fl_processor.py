@@ -69,9 +69,9 @@ class S3FLFileProcessor:
             
             # Determine file type and broadcast appropriately
             if 'shap_analysis.csv' in key:
-                # SHAP CSV file - generate reports for all rounds
+                # SHAP CSV file - just save it, don't process automatically
+                # Reports are generated from round JSON files instead
                 print(f"✅ Successfully processed SHAP CSV: {key}")
-                await self._generate_reports_from_shap_csv(key, file_content, db)
             elif key.endswith('.csv'):
                 # Other CSV files - no broadcast needed, just log
                 print(f"✅ Successfully processed CSV: {key}")
@@ -283,22 +283,55 @@ class S3FLFileProcessor:
     async def _broadcast_round_update(self, round_data: Dict[str, Any], s3_key: str):
         """Broadcast round update via WebSocket"""
         try:
+            # Transform metrics locally to avoid circular imports
+            def normalize_value(value, default=0.0):
+                return default if value is None else float(value)
+            
+            metadata = round_data.get("metadata", {})
+            global_metrics = round_data.get("globalMetrics", {})
+            round_summary = round_data.get("roundSummary", {})
+            
+            # Get accuracy with fallback logic
+            accuracy = global_metrics.get("accuracy") or round_summary.get("accuracy")
+            if accuracy is None:
+                clients = round_data.get("clients", [])
+                active = [c for c in clients if c.get("accuracy") is not None]
+                accuracy = sum(c["accuracy"] for c in active) / len(active) if active else 0.0
+            
+            accuracy_percent = normalize_value(accuracy) * 100
+            loss = global_metrics.get("loss") or round_summary.get("loss")
+            
+            metrics = {
+                "accuracy": round(accuracy_percent, 2),
+                "loss": round(normalize_value(loss), 4),
+                "currentRound": metadata.get("round", 0),
+                "totalClients": global_metrics.get("totalClients", 0),
+                "activeMaliciousClients": global_metrics.get("activeMaliciousClients", 0),
+                "defenseSuccessRate": round(normalize_value(global_metrics.get("defenseSuccessRate")), 2),
+                "isConnected": True,
+                "timestamp": metadata.get("timestamp", datetime.now().isoformat() + "Z"),
+                "sessionId": metadata.get("sessionId")
+            }
+            
             message = {
                 "type": "ROUND_COMPLETE",
                 "source": "s3",
                 "event": "s3_download",
-                "sessionId": round_data.get('metadata', {}).get('sessionId'),
-                "round": round_data.get('metadata', {}).get('round'),
+                "sessionId": metadata.get('sessionId'),
+                "round": metadata.get('round'),
                 "timestamp": datetime.now().isoformat(),
                 "s3_key": s3_key,
-                "data": round_data
+                "data": round_data,
+                "metrics": metrics
             }
             
             await self.manager.broadcast(message)
-            print(f"📡 Broadcasted round update from S3: Round {message['round']}")
+            print(f"📡 Broadcasted round update from S3: Round {message['round']} with sessionId={message['sessionId']}")
             
         except Exception as e:
             print(f"Error broadcasting round update: {e}")
+            import traceback
+            traceback.print_exc()
     
     async def _broadcast_session_summary(self, summary_data: Dict[str, Any]):
         """Broadcast session summary via WebSocket"""

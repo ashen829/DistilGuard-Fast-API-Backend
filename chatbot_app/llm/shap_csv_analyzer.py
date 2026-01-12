@@ -124,12 +124,6 @@ class SHAPCSVAnalyzer:
             
             # Build natural language description
             desc = f"**Client {client_id} - Round {round_num} Analysis**\n\n"
-            
-            # Add metrics
-            if pd.notna(accuracy):
-                desc += f"Main task accuracy: {float(accuracy):.4f}\n"
-            if pd.notna(loss):
-                desc += f"Main task loss: {float(loss):.4f}\n"
                 
             if "predicted_label" in self.df.columns:
                 desc += f"Predicted label: {latest_row['predicted_label']}\n"
