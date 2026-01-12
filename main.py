@@ -65,7 +65,8 @@ def transform_to_global_metrics(round_data):
         "activeMaliciousClients": global_metrics.get("activeMaliciousClients", 0),
         "defenseSuccessRate": round(normalize_value(global_metrics.get("defenseSuccessRate")), 2),
         "isConnected": True,
-        "timestamp": metadata.get("timestamp", datetime.utcnow().isoformat() + "Z")
+        "timestamp": metadata.get("timestamp", datetime.utcnow().isoformat() + "Z"),
+        "sessionId": metadata.get("sessionId")  # Fixed: use camelCase 'sessionId' not snake_case
     }
 
 # S3 FL File Processor

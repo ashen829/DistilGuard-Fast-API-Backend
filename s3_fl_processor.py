@@ -612,6 +612,9 @@ class S3FLFileProcessor:
         data for all rounds. We parse it, group by round, and generate reports for
         malicious clients (predicted_label == 'malicious').
         
+        DEDUPLICATION: Avoids generating duplicate reports for the same client in the same round.
+        Uses unique key: (session_id, round_number, client_id)
+        
         Args:
             s3_key: S3 key path (e.g., sessions/2025-01-12_00-07-59/shap_analysis.csv)
             csv_content: CSV file content as string
@@ -640,19 +643,42 @@ class S3FLFileProcessor:
             # Get report generator
             generator = get_report_generator()
             
+            # DEDUPLICATION: Track processed (session_id, round_num, client_id) combinations
+            processed_clients = set()
+            
             # Group by round and process each round
             all_reports = []
             rounds_processed = set()
+            duplicates_skipped = 0
             
             for _, row in df.iterrows():
                 try:
                     round_num = int(row.get('round_num', 0))
                     client_id = int(row.get('client_id', -1))
-                    predicted_label = str(row.get('predicted_label', 'benign')).lower()
-                    ground_truth = str(row.get('ground_truth_label', 'benign')).lower()
+                    predicted_label = row.get('predicted_label', 'benign')
+                    ground_truth = row.get('ground_truth_label', 'benign')
+                    
+                    # Normalize predicted label: handle both numeric (0/1) and string ('benign'/'malicious')
+                    is_malicious = False
+                    if isinstance(predicted_label, (int, float)):
+                        # Numeric labels: 1 = malicious, 0 = benign
+                        is_malicious = predicted_label == 1
+                    else:
+                        # String labels: 'malicious' or 'benign'
+                        is_malicious = str(predicted_label).lower() == 'malicious'
+                    
+                    # Normalize ground truth similarly
+                    ground_truth_str = str(ground_truth).lower() if isinstance(ground_truth, str) else ('malicious' if ground_truth == 1 else 'benign')
+                    
+                    # DEDUPLICATION CHECK: Skip if we've already processed this client in this round
+                    client_key = (session_id, round_num, client_id)
+                    if client_key in processed_clients:
+                        duplicates_skipped += 1
+                        print(f"⏭️  Skipping duplicate: Client {client_id} in Round {round_num}")
+                        continue
                     
                     # Generate report for malicious predictions
-                    if predicted_label == 'malicious':
+                    if is_malicious:
                         print(f"🎯 Found malicious client {client_id} in round {round_num}")
                         
                         # Create a minimal round_data structure from CSV row
@@ -663,10 +689,10 @@ class S3FLFileProcessor:
                                 {
                                     'client_id': client_id,
                                     'clientId': client_id,
-                                    'isMalicious': predicted_label == 'malicious',
-                                    'is_malicious': predicted_label == 'malicious',
-                                    'predicted_label': predicted_label,
-                                    'ground_truth_label': ground_truth,
+                                    'isMalicious': is_malicious,
+                                    'is_malicious': is_malicious,
+                                    'predicted_label': 'malicious' if is_malicious else 'benign',
+                                    'ground_truth_label': ground_truth_str,
                                     'main_task_accuracy': float(row.get('main_task_accuracy', 0)) if pd.notna(row.get('main_task_accuracy')) else 0,
                                     'main_task_loss': float(row.get('main_task_loss', 0)) if pd.notna(row.get('main_task_loss')) else 0,
                                 }
@@ -687,6 +713,8 @@ class S3FLFileProcessor:
                         if reports:
                             all_reports.extend(reports)
                             rounds_processed.add(round_num)
+                            # Mark this client as processed in this round
+                            processed_clients.add(client_key)
                             print(f"✅ Generated report for client {client_id} in round {round_num}")
                         
                 except Exception as e:
@@ -697,6 +725,7 @@ class S3FLFileProcessor:
             print(f"\n✅ SHAP CSV Processing Complete")
             print(f"   - Rounds processed: {len(rounds_processed)} ({sorted(rounds_processed)})")
             print(f"   - Total reports generated: {len(all_reports)}")
+            print(f"   - Duplicate clients skipped: {duplicates_skipped}")
             
             if all_reports:
                 # Group reports by round for broadcasting
@@ -713,6 +742,7 @@ class S3FLFileProcessor:
                     "sessionId": session_id,
                     "roundsProcessed": sorted(rounds_processed),
                     "totalReports": len(all_reports),
+                    "duplicatesSkipped": duplicates_skipped,
                     "status": "complete"
                 }
                 await self.manager.broadcast(message)

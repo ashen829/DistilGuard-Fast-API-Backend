@@ -18,11 +18,13 @@ import logging
 import json
 from typing import Optional, Dict, Any, List
 from datetime import datetime
+from pathlib import Path
 from sqlalchemy.orm import Session
 
 from chatbot_app.llm.agent import get_agent
 from chatbot_app.llm.shap_csv_analyzer import get_shap_csv_analyzer
 from database import FLRoundReport, SessionLocal
+from pdf_report_generator import PDFReportGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +77,8 @@ class FLReportGenerator:
         
         try:
             logger.info(f"Generating reports for session {session_id}, round {round_number}")
+            
+            logger.info(f"ROUND DATA {round_data}")
             
             # Extract malicious clients from round data
             malicious_clients = self._extract_malicious_clients(round_data)
@@ -345,20 +349,36 @@ class FLReportGenerator:
         context: Dict[str, Any],
         malicious_score: Optional[float] = None
     ) -> str:
-        """Build the prompt to ask the LLM"""
+        """Build the prompt to ask the LLM with SHAP feature context (non-technical explanation)"""
         
-        prompt = f"Why is client {client_id} detected as malicious?"
-        
-        # Add score context if available
-        if malicious_score is not None:
-            prompt += f" (malicious score: {malicious_score:.4f})"
-        
-        # Add SHAP context if available
+        # Build SHAP context for better explanations (without malicious score)
+        shap_context = ""
         if "shap_analysis" in context and context["shap_analysis"]:
-            prompt += f"\n\nBased on the SHAP analysis, explain the top contributing features that led to this detection."
+            shap_context = context["shap_analysis"]
         
-        # Add instruction for detailed but concise explanation
-        prompt += "\n\nProvide a clear, concise explanation suitable for a security analyst. Focus on the key indicators of malicious behavior without using technical jargon."
+        # If we have SHAP features, use them for the prompt
+        if shap_context:
+            prompt = f"""**Client {client_id} Behavior Analysis**
+
+Top Contributing Features:
+{shap_context}
+
+**Your Task:**
+Write a clear, simple explanation for someone without technical background. 
+- Focus on what the top features reveal about this client's behavior
+- Use simple language, not machine learning jargon
+- Explain what each abnormal feature value means in practical terms
+- Help readers understand why these patterns indicate suspicious activity
+- Keep it concise but informative"""
+        else:
+            # Fallback if no SHAP context available
+            prompt = f"""Why is client {client_id} detected as malicious?
+
+Provide a clear explanation suitable for non-technical readers:
+- Describe what indicators led to this detection
+- Explain the significance of any unusual metrics
+- Use simple, everyday language
+- Avoid technical jargon"""
         
         return prompt
     
@@ -426,6 +446,150 @@ class FLReportGenerator:
         except Exception as e:
             logger.error(f"Error extracting malicious clients: {e}")
             return []
+    
+    async def export_round_reports_to_pdf(
+        self,
+        session_id: str,
+        round_number: int,
+        db: Optional[Session] = None,
+        output_path: Optional[Path] = None
+    ) -> Optional[Path]:
+        """
+        Export reports for a specific round to a user-friendly PDF file.
+        
+        Args:
+            session_id: Session ID
+            round_number: Round number
+            db: Database session (creates new one if None)
+            output_path: Output directory for PDF (default: ./reports/)
+        
+        Returns:
+            Path to generated PDF file or None if generation fails
+        """
+        
+        # Create DB session if not provided
+        if db is None:
+            db = SessionLocal()
+            close_db = True
+        else:
+            close_db = False
+        
+        try:
+            logger.info(f"Exporting reports for session {session_id}, round {round_number} to PDF")
+            
+            # Retrieve all reports for this session and round from database
+            reports = db.query(FLRoundReport).filter(
+                FLRoundReport.session_id == session_id,
+                FLRoundReport.round_number == round_number
+            ).all()
+            
+            if not reports:
+                logger.warning(f"No reports found for session {session_id}, round {round_number}")
+                return None
+            
+            logger.info(f"Found {len(reports)} reports to export")
+            
+            # Convert reports to format expected by PDF generator
+            report_data = []
+            for report in reports:
+                report_data.append({
+                    "client_id": report.client_id,
+                    "malicious_score": report.malicious_score,
+                    "explanation": report.explanation
+                })
+            
+            # Generate PDF
+            pdf_generator = PDFReportGenerator()
+            pdf_path = pdf_generator.generate_pdf_report(
+                session_id=session_id,
+                round_number=round_number,
+                reports=report_data,
+                output_path=output_path
+            )
+            
+            if pdf_path:
+                logger.info(f"✅ PDF report exported: {pdf_path}")
+            
+            return pdf_path
+            
+        except Exception as e:
+            logger.error(f"Error exporting reports to PDF: {e}", exc_info=True)
+            return None
+        finally:
+            if close_db:
+                db.close()
+    
+    async def export_session_reports_to_pdf(
+        self,
+        session_id: str,
+        db: Optional[Session] = None,
+        output_path: Optional[Path] = None
+    ) -> Optional[Path]:
+        """
+        Export ALL reports for an entire session to PDF.
+        
+        Args:
+            session_id: Session ID
+            db: Database session (creates new one if None)
+            output_path: Output directory for PDF (default: ./reports/)
+        
+        Returns:
+            Path to generated PDF file or None if generation fails
+        """
+        
+        # Create DB session if not provided
+        if db is None:
+            db = SessionLocal()
+            close_db = True
+        else:
+            close_db = False
+        
+        try:
+            logger.info(f"Exporting all reports for session {session_id} to PDF")
+            
+            # Retrieve all reports for this session from database
+            reports = db.query(FLRoundReport).filter(
+                FLRoundReport.session_id == session_id
+            ).order_by(FLRoundReport.round_number).all()
+            
+            if not reports:
+                logger.warning(f"No reports found for session {session_id}")
+                return None
+            
+            logger.info(f"Found {len(reports)} reports to export")
+            
+            # Convert reports to format expected by PDF generator
+            report_data = []
+            round_numbers = set()
+            for report in reports:
+                report_data.append({
+                    "client_id": report.client_id,
+                    "malicious_score": report.malicious_score,
+                    "explanation": report.explanation
+                })
+                round_numbers.add(report.round_number)
+            
+            # Generate PDF (using max round number for filename)
+            max_round = max(round_numbers) if round_numbers else 0
+            pdf_generator = PDFReportGenerator()
+            pdf_path = pdf_generator.generate_pdf_report(
+                session_id=session_id,
+                round_number=max_round,  # Use max round in filename
+                reports=report_data,
+                output_path=output_path
+            )
+            
+            if pdf_path:
+                logger.info(f"✅ Full session PDF report exported: {pdf_path}")
+            
+            return pdf_path
+            
+        except Exception as e:
+            logger.error(f"Error exporting session reports to PDF: {e}", exc_info=True)
+            return None
+        finally:
+            if close_db:
+                db.close()
 
 
 # Global instance

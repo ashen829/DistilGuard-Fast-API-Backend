@@ -6,18 +6,22 @@ Provides endpoints for accessing generated FL round reports:
 - Get reports for a session/round
 - Get single report
 - Download report as JSON
+- Export reports as PDF
 """
 
 import json
 import logging
 from typing import List, Optional
 from datetime import datetime
+from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends, Query
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database import get_db, FLRoundReport
+from report_generator import get_report_generator
+from pdf_report_generator import PDFReportGenerator
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -398,4 +402,217 @@ async def get_report_stats(
         
     except Exception as e:
         logger.error(f"Error getting report stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# PDF Export Endpoints
+# ============================================================================
+
+@router.get("/export/round/{session_id}/{round_number}")
+async def export_round_reports_to_pdf(
+    session_id: str,
+    round_number: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Export reports for a specific round to PDF format.
+    
+    Path parameters:
+    - session_id: FL session ID
+    - round_number: Training round number
+    
+    Returns:
+        PDF file with user-friendly table format
+    """
+    try:
+        logger.info(f"Exporting round reports: session={session_id}, round={round_number}")
+        
+        # Retrieve reports from database
+        reports = db.query(FLRoundReport).filter(
+            FLRoundReport.session_id == session_id,
+            FLRoundReport.round_number == round_number
+        ).all()
+        
+        if not reports:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No reports found for session {session_id}, round {round_number}"
+            )
+        
+        # Convert to report format
+        report_data = [
+            {
+                "client_id": r.client_id,
+                "malicious_score": r.malicious_score,
+                "explanation": r.explanation
+            }
+            for r in reports
+        ]
+        
+        # Generate PDF
+        pdf_generator = PDFReportGenerator()
+        pdf_path = pdf_generator.generate_pdf_report(
+            session_id=session_id,
+            round_number=round_number,
+            reports=report_data,
+            output_path=Path("./reports")
+        )
+        
+        if not pdf_path or not pdf_path.exists():
+            raise HTTPException(status_code=500, detail="Failed to generate PDF")
+        
+        logger.info(f"✅ PDF generated: {pdf_path}")
+        
+        # Return PDF file
+        return FileResponse(
+            path=pdf_path,
+            filename=pdf_path.name,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={pdf_path.name}"}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting reports to PDF: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/export/session/{session_id}")
+async def export_session_reports_to_pdf(
+    session_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Export ALL reports for an entire session to PDF format.
+    
+    Path parameters:
+    - session_id: FL session ID
+    
+    Returns:
+        PDF file with comprehensive table format for all rounds
+    """
+    try:
+        logger.info(f"Exporting session reports: session={session_id}")
+        
+        # Retrieve all reports for session
+        reports = db.query(FLRoundReport).filter(
+            FLRoundReport.session_id == session_id
+        ).order_by(FLRoundReport.round_number).all()
+        
+        if not reports:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No reports found for session {session_id}"
+            )
+        
+        # Convert to report format
+        report_data = [
+            {
+                "client_id": r.client_id,
+                "malicious_score": r.malicious_score,
+                "explanation": r.explanation
+            }
+            for r in reports
+        ]
+        
+        # Get max round number for filename
+        max_round = max(r.round_number for r in reports) if reports else 0
+        
+        # Generate PDF
+        pdf_generator = PDFReportGenerator()
+        pdf_path = pdf_generator.generate_pdf_report(
+            session_id=session_id,
+            round_number=max_round,
+            reports=report_data,
+            output_path=Path("./reports")
+        )
+        
+        if not pdf_path or not pdf_path.exists():
+            raise HTTPException(status_code=500, detail="Failed to generate PDF")
+        
+        logger.info(f"✅ PDF generated: {pdf_path}")
+        
+        # Return PDF file
+        return FileResponse(
+            path=pdf_path,
+            filename=pdf_path.name,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={pdf_path.name}"}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting session reports to PDF: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/export/round/{session_id}/{round_number}/csv")
+async def export_round_reports_to_csv(
+    session_id: str,
+    round_number: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Export reports for a specific round to CSV format.
+    
+    Path parameters:
+    - session_id: FL session ID
+    - round_number: Training round number
+    
+    Returns:
+        CSV file with reports
+    """
+    try:
+        logger.info(f"Exporting round reports as CSV: session={session_id}, round={round_number}")
+        
+        # Retrieve reports from database
+        reports = db.query(FLRoundReport).filter(
+            FLRoundReport.session_id == session_id,
+            FLRoundReport.round_number == round_number
+        ).all()
+        
+        if not reports:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No reports found for session {session_id}, round {round_number}"
+            )
+        
+        # Convert to report format
+        report_data = [
+            {
+                "client_id": r.client_id,
+                "malicious_score": r.malicious_score,
+                "explanation": r.explanation
+            }
+            for r in reports
+        ]
+        
+        # Generate CSV
+        pdf_generator = PDFReportGenerator()
+        csv_path = pdf_generator.generate_csv_report(
+            session_id=session_id,
+            round_number=round_number,
+            reports=report_data,
+            output_path=Path("./reports")
+        )
+        
+        if not csv_path or not csv_path.exists():
+            raise HTTPException(status_code=500, detail="Failed to generate CSV")
+        
+        logger.info(f"✅ CSV generated: {csv_path}")
+        
+        # Return CSV file
+        return FileResponse(
+            path=csv_path,
+            filename=csv_path.name,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={csv_path.name}"}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting reports to CSV: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
