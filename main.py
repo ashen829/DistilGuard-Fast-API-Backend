@@ -15,6 +15,7 @@ from websocket_manager import manager
 from fl_session_watcher import FLSessionWatcher
 from s3_fl_processor import S3FLFileProcessor
 from chatbot_router import router as chatbot_router
+from chatbot_app.api.report_routes import router as report_router
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -81,6 +82,9 @@ app.add_middleware(
 
 # Include chatbot router
 app.include_router(chatbot_router, prefix="/api")
+
+# Include report router
+app.include_router(report_router, prefix="/api")
 
 
 @app.on_event("startup")

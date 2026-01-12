@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from aws_client import s3_client
 from database import S3Event, FileContent, FLSession, FLRound, SessionLocal
 from websocket_manager import ConnectionManager
+from report_generator import get_report_generator
 
 
 class S3FLFileProcessor:
@@ -67,13 +68,19 @@ class S3FLFileProcessor:
             local_path = await self._save_locally(key, file_content, json_data)
             
             # Determine file type and broadcast appropriately
-            if key.endswith('.csv'):
-                # CSV file - no broadcast needed, just log
+            if 'shap_analysis.csv' in key:
+                # SHAP CSV file - generate reports for all rounds
+                print(f"✅ Successfully processed SHAP CSV: {key}")
+                await self._generate_reports_from_shap_csv(key, file_content, db)
+            elif key.endswith('.csv'):
+                # Other CSV files - no broadcast needed, just log
                 print(f"✅ Successfully processed CSV: {key}")
             elif 'shap_analysis' in key:
                 await self._broadcast_shap_analysis(json_data, key)
             elif 'round_' in key:
                 await self._broadcast_round_update(json_data, key)
+                # Generate reports for malicious clients in this round
+                await self._generate_round_reports(json_data, key, db)
             elif 'summary.json' in key:
                 await self._broadcast_session_summary(json_data)
             
@@ -518,4 +525,203 @@ class S3FLFileProcessor:
             print(f"❌ Error getting client SHAP features: {e}")
             import traceback
             traceback.print_exc()
-            return None
+            return None    
+    async def _generate_round_reports(self, round_data: Dict[str, Any], s3_key: str, db: Session):
+        """
+        Generate explanation reports for malicious clients in a round.
+        
+        Args:
+            round_data: Round JSON data
+            s3_key: S3 key path
+            db: Database session
+        """
+        try:
+            # Extract session ID and round number from S3 key
+            # Format: sessions/2025-12-09_16-43-37/rounds/round_001.json
+            parts = s3_key.split('/')
+            if len(parts) < 2:
+                print(f"⚠️  Could not extract session ID from: {s3_key}")
+                return
+            
+            session_id = parts[1]
+            metadata = round_data.get('metadata', {})
+            round_number = metadata.get('round', 0)
+            
+            print(f"🔍 Generating reports for session {session_id}, round {round_number}")
+            
+            # Get report generator
+            generator = get_report_generator()
+            
+            # Generate reports for malicious clients
+            reports = await generator.generate_round_reports(
+                session_id=session_id,
+                round_number=round_number,
+                round_data=round_data,
+                db=db
+            )
+            
+            if reports:
+                print(f"✅ Generated {len(reports)} reports for round {round_number}")
+                
+                # Broadcast reports via WebSocket
+                await self._broadcast_reports_generated(session_id, round_number, reports)
+            else:
+                print(f"ℹ️  No reports generated for round {round_number}")
+            
+        except Exception as e:
+            print(f"❌ Error generating round reports: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    async def _broadcast_reports_generated(self, session_id: str, round_number: int, reports: list):
+        """
+        Broadcast report generation event via WebSocket.
+        
+        Args:
+            session_id: Session ID
+            round_number: Round number
+            reports: List of generated reports
+        """
+        try:
+            message = {
+                "type": "REPORTS_GENERATED",
+                "source": "report_generator",
+                "timestamp": datetime.now().isoformat(),
+                "sessionId": session_id,
+                "round": round_number,
+                "reportCount": len(reports),
+                "reports": reports
+            }
+            
+            await self.manager.broadcast(message)
+            print(f"📡 Broadcasted {len(reports)} reports for round {round_number}")
+            
+        except Exception as e:
+            print(f"Error broadcasting reports: {e}")
+    
+    async def _generate_reports_from_shap_csv(
+        self,
+        s3_key: str,
+        csv_content: str,
+        db: Session
+    ):
+        """
+        Generate explanation reports for all malicious clients from SHAP CSV analysis.
+        
+        This is called when shap_analysis.csv is received. The CSV contains all client
+        data for all rounds. We parse it, group by round, and generate reports for
+        malicious clients (predicted_label == 'malicious').
+        
+        Args:
+            s3_key: S3 key path (e.g., sessions/2025-01-12_00-07-59/shap_analysis.csv)
+            csv_content: CSV file content as string
+            db: Database session
+        """
+        try:
+            import pandas as pd
+            from io import StringIO
+            
+            # Extract session ID from S3 key
+            parts = s3_key.split('/')
+            if len(parts) < 2:
+                print(f"⚠️  Could not extract session ID from: {s3_key}")
+                return
+            
+            session_id = parts[1]
+            
+            print(f"🔍 Parsing SHAP CSV for session: {session_id}")
+            
+            # Parse CSV content
+            df = pd.read_csv(StringIO(csv_content))
+            
+            print(f"📊 Loaded {len(df)} records from SHAP CSV")
+            print(f"📊 Columns available: {list(df.columns)[:5]}... (showing first 5)")
+            
+            # Get report generator
+            generator = get_report_generator()
+            
+            # Group by round and process each round
+            all_reports = []
+            rounds_processed = set()
+            
+            for _, row in df.iterrows():
+                try:
+                    round_num = int(row.get('round_num', 0))
+                    client_id = int(row.get('client_id', -1))
+                    predicted_label = str(row.get('predicted_label', 'benign')).lower()
+                    ground_truth = str(row.get('ground_truth_label', 'benign')).lower()
+                    
+                    # Generate report for malicious predictions
+                    if predicted_label == 'malicious':
+                        print(f"🎯 Found malicious client {client_id} in round {round_num}")
+                        
+                        # Create a minimal round_data structure from CSV row
+                        # The report generator will use SHAP analyzer if available
+                        round_data = {
+                            'metadata': {'round': round_num},
+                            'clients': [
+                                {
+                                    'client_id': client_id,
+                                    'clientId': client_id,
+                                    'isMalicious': predicted_label == 'malicious',
+                                    'is_malicious': predicted_label == 'malicious',
+                                    'predicted_label': predicted_label,
+                                    'ground_truth_label': ground_truth,
+                                    'main_task_accuracy': float(row.get('main_task_accuracy', 0)) if pd.notna(row.get('main_task_accuracy')) else 0,
+                                    'main_task_loss': float(row.get('main_task_loss', 0)) if pd.notna(row.get('main_task_loss')) else 0,
+                                }
+                            ],
+                            'globalMetrics': {
+                                'detectedClients': [{'clientId': client_id, 'score': 0.95}]
+                            }
+                        }
+                        
+                        # Generate report for this client
+                        reports = await generator.generate_round_reports(
+                            session_id=session_id,
+                            round_number=round_num,
+                            round_data=round_data,
+                            db=db
+                        )
+                        
+                        if reports:
+                            all_reports.extend(reports)
+                            rounds_processed.add(round_num)
+                            print(f"✅ Generated report for client {client_id} in round {round_num}")
+                        
+                except Exception as e:
+                    print(f"⚠️  Error processing row: {e}")
+                    continue
+            
+            # Summary
+            print(f"\n✅ SHAP CSV Processing Complete")
+            print(f"   - Rounds processed: {len(rounds_processed)} ({sorted(rounds_processed)})")
+            print(f"   - Total reports generated: {len(all_reports)}")
+            
+            if all_reports:
+                # Group reports by round for broadcasting
+                reports_by_round = {}
+                for report in all_reports:
+                    # These reports are already stored in DB by generator
+                    pass
+                
+                # Broadcast summary of what was generated
+                message = {
+                    "type": "SHAP_REPORTS_GENERATED",
+                    "source": "shap_csv_processor",
+                    "timestamp": datetime.now().isoformat(),
+                    "sessionId": session_id,
+                    "roundsProcessed": sorted(rounds_processed),
+                    "totalReports": len(all_reports),
+                    "status": "complete"
+                }
+                await self.manager.broadcast(message)
+                print(f"📡 Broadcasted SHAP processing completion to clients")
+            else:
+                print(f"ℹ️  No malicious clients found in SHAP CSV")
+            
+        except Exception as e:
+            print(f"❌ Error processing SHAP CSV: {e}")
+            import traceback
+            traceback.print_exc()
+

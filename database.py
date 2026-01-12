@@ -106,6 +106,20 @@ class FLRound(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class FLRoundReport(Base):
+    __tablename__ = "fl_round_reports"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String, index=True)
+    round_number = Column(Integer, index=True)
+    client_id = Column(Integer, index=True)
+    malicious_score = Column(JSON, nullable=True)  # Store detection score/confidence
+    explanation = Column(Text)  # Generated explanation using LLM
+    report_data = Column(JSON, nullable=True)  # Additional report metadata
+    timestamp = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 def get_db():
     db = SessionLocal()
     try:
