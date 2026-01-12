@@ -99,7 +99,7 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"Redis not available: {e}")
     
-    # Initialize FL Session Watcher
+    # Initialize FL Session Watch
     sessions_path = os.getenv("FL_SESSIONS_PATH", "sessions")
     fl_watcher = FLSessionWatcher(manager, sessions_path)
     await fl_watcher.start()

@@ -11,8 +11,9 @@ from watchdog.events import FileSystemEventHandler, FileCreatedEvent, FileModifi
 class SessionFileHandler(FileSystemEventHandler):
     """Handles file system events for FL session files"""
     
-    def __init__(self, websocket_manager, callback=None):
+    def __init__(self, websocket_manager, loop, callback=None):
         self.manager = websocket_manager
+        self.loop = loop  # Store reference to the main event loop
         self.callback = callback
         self.processed_files = set()
         self.current_session = None
@@ -22,16 +23,16 @@ class SessionFileHandler(FileSystemEventHandler):
             return
         
         if self._is_round_file(event.src_path):
-            asyncio.create_task(self._process_file(event.src_path, 'created'))
+            asyncio.run_coroutine_threadsafe(self._process_file(event.src_path, 'created'), self.loop)
         elif event.src_path.endswith('summary.json'):
-            asyncio.create_task(self._process_summary(event.src_path))
+            asyncio.run_coroutine_threadsafe(self._process_summary(event.src_path), self.loop)
     
     def on_modified(self, event):
         if event.is_directory:
             return
         
         if self._is_round_file(event.src_path):
-            asyncio.create_task(self._process_file(event.src_path, 'modified'))
+            asyncio.run_coroutine_threadsafe(self._process_file(event.src_path, 'modified'), self.loop)
     
     def _is_round_file(self, file_path: str) -> bool:
         """Check if file is a round JSON file"""
@@ -114,8 +115,9 @@ class FLSessionWatcher:
         # Ensure sessions directory exists
         self.sessions_path.mkdir(parents=True, exist_ok=True)
         
-        # Create handler and observer
-        self.handler = SessionFileHandler(self.manager)
+        # Create handler and observer, passing the current event loop
+        loop = asyncio.get_running_loop()
+        self.handler = SessionFileHandler(self.manager, loop)
         self.observer = Observer()
         self.observer.schedule(self.handler, str(self.sessions_path), recursive=True)
         

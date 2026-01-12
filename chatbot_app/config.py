@@ -24,7 +24,7 @@ REPETITION_PENALTY = 1.05
 
 # Server Config
 HOST = os.environ.get("HOST", "0.0.0.0")
-PORT = int(os.environ.get("PORT", 8002))
+PORT = int(os.environ.get("PORT", 8005))
 DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
 
 # Data Sources - SHAP CSV from latest session
