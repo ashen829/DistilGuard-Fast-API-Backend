@@ -649,22 +649,22 @@ async def generate_reports_for_session(
                 
                 logger.info(f"🎯 Found malicious client {client_id} in round {round_num}")
                 
-                # Build SHAP context for this client
-                # Get top 5 SHAP features for this client
-                client_data = df[df['client_id'] == client_id]
+                # Build SHAP context for this client in this specific round
+                # Get top 5 SHAP features for this client IN THIS ROUND (not last round)
+                client_data = df[(df['client_id'] == client_id) & (df['round_num'] == round_num)]
                 if client_data.empty:
                     continue
                 
-                latest_client_row = client_data.iloc[-1]
+                client_row = client_data.iloc[0]  # Get the row for this round
                 
                 # Find all SHAP columns
                 shap_columns = [col for col in df.columns if col.startswith('SHAP_')]
                 
                 if shap_columns:
-                    # Extract SHAP values
+                    # Extract SHAP values from this round's data
                     shap_values = {}
                     for shap_col in shap_columns:
-                        val = latest_client_row[shap_col]
+                        val = client_row[shap_col]
                         if pd.notna(val):
                             feature_col = shap_col.replace('SHAP_', '')
                             shap_values[feature_col] = float(val)
@@ -681,7 +681,7 @@ async def generate_reports_for_session(
                     shap_context += "**Top 5 Contributing Features (by SHAP value):**\n\n"
                     
                     for idx, (feature_name, shap_val) in enumerate(sorted_features, 1):
-                        feature_value = latest_client_row.get(feature_name)
+                        feature_value = client_row.get(feature_name)
                         
                         if pd.notna(feature_value):
                             feat_val_str = f"{float(feature_value):.4f}"
